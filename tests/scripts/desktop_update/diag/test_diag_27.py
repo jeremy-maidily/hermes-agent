@@ -12,7 +12,7 @@ from tests.installation_launcher_fixture import publish_fixture_launcher
 from tests.scripts.desktop_update.windows_handoff_support import _log
 from tests.waiting import wait_until
 
-ROOT = Path(__file__).resolve().parent.parent.parent.parent
+ROOT = Path(__file__).resolve().parents[4]
 SCRIPT = ROOT / "scripts/desktop-update/windows.ps1"
 DIAG_CLI = """
 import os, sys, json, time, tempfile
