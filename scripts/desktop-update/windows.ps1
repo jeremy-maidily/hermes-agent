@@ -104,9 +104,31 @@ $LogDir = Join-Path $HermesHome "logs"
 $LogPath = Join-Path $LogDir "desktop-update-handoff.log"
 $ResultPath = Join-Path $HermesHome ".hermes-update-result.json"
 
+function Add-HandoffLogLine([string]$Line) {
+    # Add-Content opens the log without read sharing, so any reader holding it (`hermes logs
+    # handoff -f`, the Desktop's hand-off report, a test polling for a line) failed the append,
+    # and the swallowed error lost the line for good: a relayed stage is marked seen before it
+    # is logged, so it was never written. Append-only access with full sharing never conflicts
+    # with a reader, and AppendData writes at end-of-file atomically, so this script's helper
+    # processes appending to the same log cannot overwrite each other's lines either.
+    $bytes = [Text.Encoding]::UTF8.GetBytes($Line + "`r`n")
+    $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+    for ($attempt = 1; $attempt -le 20; $attempt++) {
+        try {
+            $stream = New-Object IO.FileStream($LogPath, [IO.FileMode]::Append,
+                [Security.AccessControl.FileSystemRights]::AppendData, $share, 4096, [IO.FileOptions]::None)
+            try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
+            return
+        } catch [IO.IOException] {
+            # A writer outside this script that holds the log unshared: wait it out, briefly.
+            Start-Sleep -Milliseconds 25
+        } catch { return }
+    }
+}
+
 function Write-HandoffLog([string]$Message) {
     $line = "{0:yyyy-MM-ddTHH:mm:ssK} {1}" -f (Get-Date), $Message
-    try { Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8 } catch {}
+    Add-HandoffLogLine $line
     if ($MarkerOp) { return }   # a helper op's stdout is its one verdict line
     if ($script:ConsoleInput -and [HermesHandoff.ConsoleInput]::Selecting()) { return }
     Write-Host $line
@@ -1369,7 +1391,7 @@ exit 7
     # Writes straight to the console stream, holding nothing: a step that is
     # merely loud. `hermes update` is this shape -- the Electron/vite build
     # alone is megabytes. Few large lines rather than many small ones on
-    # purpose: Write-HandoffLog is one Add-Content per line and runs inside the
+    # purpose: Write-HandoffLog is one file append per line and runs inside the
     # measured window, so line-heavy output would time the logger instead of
     # the drain.
     $floodSource = @'

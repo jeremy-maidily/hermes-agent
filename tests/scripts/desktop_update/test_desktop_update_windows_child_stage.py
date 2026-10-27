@@ -68,3 +68,54 @@ def test_handoff_shows_the_stage_the_update_publishes(tmp_path: Path) -> None:
         except subprocess.TimeoutExpired:
             subprocess.run(["taskkill", "/T", "/F", "/PID", str(script.pid)], capture_output=True, check=False)
             script.wait(timeout=30)
+
+
+TAILED_STAGE_CLI = """
+import os, sys
+from pathlib import Path
+def main():
+    if '--version' in sys.argv:
+        print('Install directory: ' + str(Path(__file__).resolve().parents[1])); return 0
+    if '--help' in sys.argv:
+        print('--keep-stash'); return 0
+    if sys.argv[1:2] == ['update']:
+        sys.path.insert(0, os.environ['HANDOFF_REPO'])
+        for name in [m for m in sys.modules if m == 'hermes_cli' or m.startswith('hermes_cli.')]:
+            del sys.modules[name]
+        from hermes_cli.update_stage import publish_stage
+        from tests.waiting import wait_until
+        # A reader tailing the hand-off log keeps it open for the whole stage, as
+        # `hermes logs handoff -f` does: the relayed line must still land, and land where it reads.
+        log = Path(os.environ['HERMES_HOME']) / 'logs' / 'desktop-update-handoff.log'
+        with open(log, 'rb') as tail:
+            seen = bytearray()
+            publish_stage('Packaging the desktop app')
+            wait_until(lambda: seen.extend(tail.read()) or b'stage: Packaging the desktop app' in seen,
+                       timeout=60, what='the stage line to reach the open log')
+    return 0
+if __name__ == '__main__':
+    sys.exit(main())
+"""
+
+
+@pytest.mark.platforms("windows")
+def test_a_reader_holding_the_handoff_log_does_not_lose_the_relayed_stage(tmp_path: Path) -> None:
+    install = tmp_path / "checkout"
+    publish_fixture_launcher(install, TAILED_STAGE_CLI)
+    home = tmp_path / "home"
+    home.mkdir()
+    script = subprocess.Popen(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(SCRIPT),
+         "-InstallRoot", str(install), "-NoUi"],
+        cwd=tmp_path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        env={**os.environ, "HERMES_HOME": str(home), "HERMES_RUNTIME_DIR": str(tmp_path / "empty-store"),
+             "HANDOFF_REPO": str(ROOT)},
+    )
+    try:
+        script.wait(timeout=240)
+    except subprocess.TimeoutExpired:
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(script.pid)], capture_output=True, check=False)
+        script.wait(timeout=30)
+    log = _log(home)
+    assert "stage: Packaging the desktop app" in log, (
+        f"the stage line was lost while a reader held the log (exit {script.returncode}):\n" + log[-3000:])
